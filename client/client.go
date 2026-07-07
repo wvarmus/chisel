@@ -34,6 +34,7 @@ type Config struct {
 	Fingerprint      string
 	Auth             string
 	KeepAlive        time.Duration
+	KeepAliveTimeout time.Duration
 	MaxRetryCount    int
 	MaxRetryInterval time.Duration
 	Server           string
@@ -181,11 +182,12 @@ func NewClient(c *Config) (*Client, error) {
 	}
 	//prepare client tunnel
 	client.tunnel = tunnel.New(tunnel.Config{
-		Logger:    client.Logger,
-		Inbound:   true, //client always accepts inbound
-		Outbound:  hasReverse,
-		Socks:     hasReverse && hasSocks,
-		KeepAlive: client.config.KeepAlive,
+		Logger:           client.Logger,
+		Inbound:          true, //client always accepts inbound
+		Outbound:         hasReverse,
+		Socks:            hasReverse && hasSocks,
+		KeepAlive:        client.config.KeepAlive,
+		KeepAliveTimeout: client.config.KeepAliveTimeout,
 	})
 	return client, nil
 }

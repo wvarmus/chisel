@@ -144,6 +144,11 @@ var serverHelp = `
     specify a time with a unit, for example '5s' or '2m'. Defaults
     to '25s' (set to 0s to disable).
 
+    --keepalive-timeout, Optional maximum time to wait for a keepalive
+    response before closing the connection. You must specify a time with a
+    unit, for example '10s' or '1m'. Defaults to 0s, which preserves the
+    original blocking keepalive behavior.
+
     --backend, Specifies another HTTP server to proxy requests to when
     chisel receives a normal HTTP request. Useful for hiding chisel in
     plain sight.
@@ -153,6 +158,11 @@ var serverHelp = `
 
     --reverse, Allow clients to specify reverse port forwarding remotes
     in addition to normal remotes.
+
+    --reverse-takeover, Allow a new reverse session to replace an existing
+    reverse session owned by the same authenticated user when it requests the
+    same local reverse listener. This helps recover stale reverse listeners
+    after a blackholed client connection.
 
     --tls-key, Enables TLS and provides optional path to a PEM-encoded
     TLS private key. When this flag is set, you must also set --tls-cert,
@@ -186,10 +196,12 @@ func server(args []string) {
 	flags.StringVar(&config.AuthFile, "authfile", "", "")
 	flags.StringVar(&config.Auth, "auth", "", "")
 	flags.DurationVar(&config.KeepAlive, "keepalive", 25*time.Second, "")
+	flags.DurationVar(&config.KeepAliveTimeout, "keepalive-timeout", 0, "")
 	flags.StringVar(&config.Proxy, "proxy", "", "")
 	flags.StringVar(&config.Proxy, "backend", "", "")
 	flags.BoolVar(&config.Socks5, "socks5", false, "")
 	flags.BoolVar(&config.Reverse, "reverse", false, "")
+	flags.BoolVar(&config.ReverseTakeover, "reverse-takeover", false, "")
 	flags.StringVar(&config.TLS.Key, "tls-key", "", "")
 	flags.StringVar(&config.TLS.Cert, "tls-cert", "", "")
 	flags.Var(multiFlag{&config.TLS.Domains}, "tls-domain", "")
@@ -380,6 +392,11 @@ var clientHelp = `
     specify a time with a unit, for example '5s' or '2m'. Defaults
     to '25s' (set to 0s to disable).
 
+    --keepalive-timeout, Optional maximum time to wait for a keepalive
+    response before closing the connection. You must specify a time with a
+    unit, for example '10s' or '1m'. Defaults to 0s, which preserves the
+    original blocking keepalive behavior.
+
     --max-retry-count, Maximum number of times to retry before exiting.
     Defaults to unlimited.
 
@@ -427,6 +444,7 @@ func client(args []string) {
 	flags.StringVar(&config.Fingerprint, "fingerprint", "", "")
 	flags.StringVar(&config.Auth, "auth", "", "")
 	flags.DurationVar(&config.KeepAlive, "keepalive", 25*time.Second, "")
+	flags.DurationVar(&config.KeepAliveTimeout, "keepalive-timeout", 0, "")
 	flags.IntVar(&config.MaxRetryCount, "max-retry-count", -1, "")
 	flags.DurationVar(&config.MaxRetryInterval, "max-retry-interval", 0, "")
 	flags.StringVar(&config.Proxy, "proxy", "", "")

@@ -1,6 +1,7 @@
 package chserver
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -13,6 +14,99 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/errgroup"
 )
+
+func reverseSessionUser(user *settings.User) string {
+	if user == nil {
+		return ""
+	}
+	return user.Name
+}
+
+func reverseSessionKey(r *settings.Remote) string {
+	return r.LocalProto + ":" + r.Local()
+}
+
+func reverseSessionKeys(remotes settings.Remotes) []string {
+	keys := make([]string, 0, len(remotes))
+	for _, r := range remotes {
+		keys = append(keys, reverseSessionKey(r))
+	}
+	return keys
+}
+
+func (s *Server) takeoverReverseSessions(id int32, user string, remotes settings.Remotes) []*reverseSession {
+	if len(remotes) == 0 {
+		return nil
+	}
+	victims := map[*reverseSession]struct{}{}
+	s.reverseMu.Lock()
+	for _, r := range remotes {
+		key := reverseSessionKey(r)
+		sess := s.reverseIndex[key]
+		if sess == nil || sess.id == id || sess.user != user {
+			continue
+		}
+		victims[sess] = struct{}{}
+	}
+	s.reverseMu.Unlock()
+	for sess := range victims {
+		s.Infof("Taking over reverse session#%d", sess.id)
+		sess.cancel()
+	}
+	out := make([]*reverseSession, 0, len(victims))
+	for sess := range victims {
+		out = append(out, sess)
+	}
+	return out
+}
+
+func waitReverseSessions(victims []*reverseSession, timeout time.Duration) bool {
+	if len(victims) == 0 {
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for _, sess := range victims {
+		select {
+		case <-sess.done:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
+}
+
+func reverseCanListen(remotes settings.Remotes) bool {
+	for _, r := range remotes {
+		if !r.CanListen() {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) registerReverseSession(id int32, user string, cancel context.CancelFunc, remotes settings.Remotes) func() {
+	keys := reverseSessionKeys(remotes)
+	if len(keys) == 0 {
+		return func() {}
+	}
+	sess := &reverseSession{id: id, user: user, cancel: cancel, done: make(chan struct{}), keys: keys}
+	s.reverseMu.Lock()
+	for _, key := range keys {
+		s.reverseIndex[key] = sess
+	}
+	s.reverseMu.Unlock()
+	return func() {
+		s.reverseMu.Lock()
+		for _, key := range sess.keys {
+			if s.reverseIndex[key] == sess {
+				delete(s.reverseIndex, key)
+			}
+		}
+		s.reverseMu.Unlock()
+		close(sess.done)
+	}
+}
 
 // handleClientHandler is the main http websocket handler for the chisel server
 func (s *Server) handleClientHandler(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +194,8 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, req *http.Request) {
 		failed(s.Errorf("invalid config"))
 		return
 	}
+	serverInbound := c.Remotes.Reversed(true)
+	userName := reverseSessionUser(user)
 	//print if client and server  versions dont match
 	cv := strings.TrimPrefix(c.Version, "v")
 	if cv == "" {
@@ -126,21 +222,37 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, req *http.Request) {
 			failed(s.Errorf("Reverse port forwaring not enabled on server"))
 			return
 		}
-		//confirm reverse tunnel is available
-		if r.Reverse && !r.CanListen() {
-			failed(s.Errorf("Server cannot listen on %s", r.String()))
-			return
+	}
+	var takeoverVictims []*reverseSession
+	if s.config.ReverseTakeover {
+		takeoverVictims = s.takeoverReverseSessions(id, userName, serverInbound)
+	}
+	if len(takeoverVictims) > 0 {
+		waitReverseSessions(takeoverVictims, settings.EnvDuration("REVERSE_TAKEOVER_TIMEOUT", 2*time.Second))
+	}
+	//confirm reverse tunnels are available after optional takeover
+	if !reverseCanListen(serverInbound) {
+		for _, r := range serverInbound {
+			if !r.CanListen() {
+				failed(s.Errorf("Server cannot listen on %s", r.String()))
+				return
+			}
 		}
 	}
 	//successfuly validated config!
 	r.Reply(true, nil)
+	sessionCtx, sessionCancel := context.WithCancel(req.Context())
+	defer sessionCancel()
+	unregisterReverseSession := s.registerReverseSession(id, userName, sessionCancel, serverInbound)
+	defer unregisterReverseSession()
 	//tunnel per ssh connection
 	tunnelConfig := tunnel.Config{
-		Logger:    l,
-		Inbound:   s.config.Reverse,
-		Outbound:  true, //server always accepts outbound
-		Socks:     s.config.Socks5,
-		KeepAlive: s.config.KeepAlive,
+		Logger:           l,
+		Inbound:          s.config.Reverse,
+		Outbound:         true, //server always accepts outbound
+		Socks:            s.config.Socks5,
+		KeepAlive:        s.config.KeepAlive,
+		KeepAliveTimeout: s.config.KeepAliveTimeout,
 	}
 	//enforce ACL on every channel, not just the initial config
 	if user != nil {
@@ -148,14 +260,13 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, req *http.Request) {
 	}
 	tunnel := tunnel.New(tunnelConfig)
 	//bind
-	eg, ctx := errgroup.WithContext(req.Context())
+	eg, ctx := errgroup.WithContext(sessionCtx)
 	eg.Go(func() error {
 		//connected, handover ssh connection for tunnel to use, and block
 		return tunnel.BindSSH(ctx, sshConn, reqs, chans)
 	})
 	eg.Go(func() error {
 		//connected, setup reversed-remotes?
-		serverInbound := c.Remotes.Reversed(true)
 		if len(serverInbound) == 0 {
 			return nil
 		}

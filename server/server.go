@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -23,15 +24,25 @@ import (
 
 // Config is the configuration for the chisel service
 type Config struct {
-	KeySeed   string
-	KeyFile   string
-	AuthFile  string
-	Auth      string
-	Proxy     string
-	Socks5    bool
-	Reverse   bool
-	KeepAlive time.Duration
-	TLS       TLSConfig
+	KeySeed          string
+	KeyFile          string
+	AuthFile         string
+	Auth             string
+	Proxy            string
+	Socks5           bool
+	Reverse          bool
+	ReverseTakeover  bool
+	KeepAlive        time.Duration
+	KeepAliveTimeout time.Duration
+	TLS              TLSConfig
+}
+
+type reverseSession struct {
+	id     int32
+	user   string
+	cancel context.CancelFunc
+	done   chan struct{}
+	keys   []string
 }
 
 // Server respresent a chisel service
@@ -45,6 +56,8 @@ type Server struct {
 	sessions     *settings.Users
 	sshConfig    *ssh.ServerConfig
 	users        *settings.UserIndex
+	reverseMu    sync.Mutex
+	reverseIndex map[string]*reverseSession
 }
 
 var upgrader = websocket.Upgrader{
@@ -56,10 +69,11 @@ var upgrader = websocket.Upgrader{
 // NewServer creates and returns a new chisel server
 func NewServer(c *Config) (*Server, error) {
 	server := &Server{
-		config:     c,
-		httpServer: cnet.NewHTTPServer(),
-		Logger:     cio.NewLogger("server"),
-		sessions:   settings.NewUsers(),
+		config:       c,
+		httpServer:   cnet.NewHTTPServer(),
+		Logger:       cio.NewLogger("server"),
+		sessions:     settings.NewUsers(),
+		reverseIndex: make(map[string]*reverseSession),
 	}
 	server.Info = true
 	server.users = settings.NewUserIndex(server.Logger)
