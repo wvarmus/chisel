@@ -9,16 +9,9 @@ on:
 permissions:
   contents: write
 jobs:
-  # ================
-  # BUILD AND TEST JOB
-  # ================
   test:
-    name: Build & Test
-    strategy:
-      matrix:
-        go-version: ["stable"]
-        platform: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.platform }}
+    name: Linux Test
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -27,18 +20,46 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: stable
           check-latest: true
       - name: Build
         run: go build -v -o /dev/null .
       - name: Test
         run: go test -v ./...
+
+  linux_build:
+    name: Linux Build (${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch:
+          - amd64
+          - arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+      - name: Cross build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -v -o /tmp/chisel-linux-${{ matrix.goarch }} .
+
   # ================
   # RELEASE BINARIES (on push "v*" tag)
   # ================
   release_binaries:
     name: Release Binaries
-    needs: test
+    needs:
+      - test
+      - linux_build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
